@@ -18,6 +18,7 @@ export default function DashboardPage() {
   const [people, setPeople] = useState<Person[]>([])
   const [businesses, setBusinesses] = useState<Business[]>([])
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
 
   useEffect(() => {
     if (authLoading) return
@@ -27,31 +28,36 @@ export default function DashboardPage() {
     }
 
     async function loadData() {
-      const q = query(collection(db, 'households'), where('ownerId', '==', user!.uid), limit(1))
-      const snapshot = await getDocs(q)
+      try {
+        const q = query(collection(db, 'households'), where('ownerId', '==', user!.uid), limit(1))
+        const snapshot = await getDocs(q)
 
-      if (snapshot.empty) {
-        router.replace('/onboarding')
-        return
+        if (snapshot.empty) {
+          router.replace('/onboarding')
+          return
+        }
+
+        const householdDoc = snapshot.docs[0]
+        const householdData: Household = {
+          id: householdDoc.id,
+          ...(householdDoc.data() as Omit<Household, 'id'>),
+        }
+        setHousehold(householdData)
+
+        const [peopleSnap, businessSnap] = await Promise.all([
+          getDocs(collection(db, 'households', householdData.id, 'people')),
+          getDocs(collection(db, 'households', householdData.id, 'businesses')),
+        ])
+
+        setPeople(peopleSnap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<Person, 'id'>) })))
+        setBusinesses(
+          businessSnap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<Business, 'id'>) }))
+        )
+      } catch (err: any) {
+        setLoadError(err?.message ?? 'Could not load this page.')
+      } finally {
+        setLoading(false)
       }
-
-      const householdDoc = snapshot.docs[0]
-      const householdData: Household = {
-        id: householdDoc.id,
-        ...(householdDoc.data() as Omit<Household, 'id'>),
-      }
-      setHousehold(householdData)
-
-      const [peopleSnap, businessSnap] = await Promise.all([
-        getDocs(collection(db, 'households', householdData.id, 'people')),
-        getDocs(collection(db, 'households', householdData.id, 'businesses')),
-      ])
-
-      setPeople(peopleSnap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<Person, 'id'>) })))
-      setBusinesses(
-        businessSnap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<Business, 'id'>) }))
-      )
-      setLoading(false)
     }
 
     loadData()
@@ -70,16 +76,54 @@ export default function DashboardPage() {
     )
   }
 
+  if (loadError) {
+    return (
+      <main className="mx-auto max-w-5xl px-4 py-10">
+        <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">{loadError}</div>
+      </main>
+    )
+  }
+
   return (
     <main className="mx-auto max-w-5xl px-4 py-10">
       <div className="mb-8 flex items-center justify-between">
                <h1 className="text-2xl font-semibold">Family Graph</h1>
         <div className="flex items-center gap-3">
           <Link
+            href="/chat"
+            className="rounded-md bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-800"
+          >
+            Chat
+          </Link>
+          <Link
+            href="/edit-details"
+            className="rounded-md border border-slate-300 px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-50"
+          >
+            Edit Details
+          </Link>
+          <Link
+            href="/tasks"
+            className="rounded-md bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-800"
+          >
+            Tasks
+          </Link>
+          <Link
+            href="/opportunities"
+            className="rounded-md bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-800"
+          >
+            Opportunities
+          </Link>
+          <Link
             href="/documents"
             className="rounded-md bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-800"
           >
             Smart Upload
+          </Link>
+          <Link
+            href="/life-events"
+            className="rounded-md border border-slate-300 px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-50"
+          >
+            Life Events
           </Link>
           <button
             onClick={handleLogout}

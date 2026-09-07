@@ -1,4 +1,5 @@
 import type { Person, Business } from '@/lib/types'
+import { effectiveAge } from '@/lib/age'
 
 export default function FamilyTree({
   householdName,
@@ -14,19 +15,28 @@ export default function FamilyTree({
       <h2 className="text-lg font-semibold text-slate-900">{householdName}</h2>
 
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        {people.map((person) => (
+        {people.map((person) => {
+          const age = effectiveAge(person)
+          return (
           <div
             key={person.id}
-            className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm"
+            className={`rounded-lg border p-4 shadow-sm ${
+              person.status === 'deceased' ? 'border-slate-200 bg-slate-50 opacity-60' : 'border-slate-200 bg-white'
+            }`}
           >
-            <p className="font-medium text-slate-900">{person.name}</p>
+            <p className="font-medium text-slate-900">
+              {person.name}
+              {person.status === 'deceased' && <span className="ml-2 text-xs font-normal text-slate-400">(deceased)</span>}
+            </p>
             <p className="text-xs text-slate-500">
-              {[person.age && `${person.age} yrs`, person.employmentStatus]
+              {[age != null && `${age} yrs`, person.employmentStatus]
                 .filter(Boolean)
                 .join(' · ') || 'No details yet'}
             </p>
-            {person.incomeBracket && (
-              <p className="mt-1 text-xs text-slate-500">Income: {person.incomeBracket}</p>
+            {person.monthlyIncome != null && (
+              <p className="mt-1 text-xs text-slate-500">
+                Income: ${person.monthlyIncome.toLocaleString()}/mo
+              </p>
             )}
             {person.responsibilities.length > 0 && (
               <div className="mt-3 flex flex-wrap gap-1">
@@ -41,7 +51,8 @@ export default function FamilyTree({
               </div>
             )}
           </div>
-        ))}
+          )
+        })}
       </div>
 
       {businesses.length > 0 && (

@@ -2,30 +2,45 @@
 
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { collection, addDoc, serverTimestamp } from 'firebase/firestore'
+import { collection, addDoc, doc, serverTimestamp, updateDoc } from 'firebase/firestore'
 import { useAuth } from '@/lib/AuthProvider'
 import { db } from '@/lib/firebaseClient'
-import { RESPONSIBILITY_OPTIONS, EmploymentStatus } from '@/lib/types'
+import {
+  RESPONSIBILITY_OPTIONS,
+  EmploymentStatus,
+  HOUSING_TYPES,
+  HOUSING_TYPE_LABELS,
+  CitizenshipStatus,
+  PersonRelationship,
+  HousingType,
+} from '@/lib/types'
 
-type Step = 'household' | 'people' | 'business' | 'done'
+type Step = 'household' | 'people' | 'housing' | 'business' | 'done'
+const STEPS: Step[] = ['household', 'people', 'housing', 'business', 'done']
 
 interface DraftPerson {
   name: string
-  age: string
+  dateOfBirth: string
   employmentStatus: EmploymentStatus | ''
-  incomeBracket: string
+  citizenshipStatus: CitizenshipStatus | ''
+  relationship: PersonRelationship | ''
+  monthlyIncome: string
+  workingHoursPerMonth: string
+  birthOrder: string
   responsibilities: string[]
 }
 
 const EMPTY_PERSON: DraftPerson = {
   name: '',
-  age: '',
+  dateOfBirth: '',
   employmentStatus: '',
-  incomeBracket: '',
+  citizenshipStatus: '',
+  relationship: '',
+  monthlyIncome: '',
+  workingHoursPerMonth: '',
+  birthOrder: '',
   responsibilities: [],
 }
-
-const INCOME_BRACKETS = ['0-2,000', '2,000-4,000', '4,000-6,000', '6,000-10,000', '10,000+']
 
 export default function OnboardingPage() {
   const { user } = useAuth()
@@ -38,6 +53,9 @@ export default function OnboardingPage() {
   // Step 1: household
   const [householdName, setHouseholdName] = useState('')
   const [householdId, setHouseholdId] = useState<string | null>(null)
+  const [housingType, setHousingType] = useState<HousingType | ''>('')
+  const [propertiesOwned, setPropertiesOwned] = useState('')
+  const [residentialAnnualValue, setResidentialAnnualValue] = useState('')
 
   // Step 2: people
   const [addedPeople, setAddedPeople] = useState<string[]>([])
@@ -50,6 +68,11 @@ export default function OnboardingPage() {
   const [employeeCount, setEmployeeCount] = useState('')
   const [revenueBracket, setRevenueBracket] = useState('')
 
+  function goBack() {
+    const idx = STEPS.indexOf(step)
+    if (idx > 0) setStep(STEPS[idx - 1])
+  }
+
   async function handleCreateHousehold(e: React.FormEvent) {
     e.preventDefault()
     if (!user) return
@@ -57,15 +80,44 @@ export default function OnboardingPage() {
     setSubmitting(true)
 
     try {
-      const docRef = await addDoc(collection(db, 'households'), {
-        name: householdName,
-        ownerId: user.uid,
-        createdAt: serverTimestamp(),
-      })
-      setHouseholdId(docRef.id)
+      if (householdId) {
+        // Revisited via Back — update the existing household instead of
+        // creating a second one.
+        await updateDoc(doc(db, 'households', householdId), { name: householdName })
+      } else {
+        const docRef = await addDoc(collection(db, 'households'), {
+          name: householdName,
+          ownerId: user.uid,
+          createdAt: serverTimestamp(),
+          housingType: null,
+          propertiesOwned: null,
+          residentialAnnualValue: null,
+        })
+        setHouseholdId(docRef.id)
+      }
       setStep('people')
     } catch (err: any) {
       setError(err?.message ?? 'Could not create household.')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function handleSaveHousing(e: React.FormEvent) {
+    e.preventDefault()
+    if (!householdId) return
+    setError(null)
+    setSubmitting(true)
+
+    try {
+      await updateDoc(doc(db, 'households', householdId), {
+        housingType: housingType || null,
+        propertiesOwned: propertiesOwned ? Number(propertiesOwned) : null,
+        residentialAnnualValue: residentialAnnualValue ? Number(residentialAnnualValue) : null,
+      })
+      setStep('business')
+    } catch (err: any) {
+      setError(err?.message ?? 'Could not save housing details.')
     } finally {
       setSubmitting(false)
     }
@@ -89,9 +141,16 @@ export default function OnboardingPage() {
     try {
       await addDoc(collection(db, 'households', householdId, 'people'), {
         name: draftPerson.name,
-        age: draftPerson.age ? Number(draftPerson.age) : null,
+        age: null,
+        dateOfBirth: draftPerson.dateOfBirth || null,
         employmentStatus: draftPerson.employmentStatus || null,
-        incomeBracket: draftPerson.incomeBracket || null,
+        incomeBracket: null,
+        citizenshipStatus: draftPerson.citizenshipStatus || null,
+        relationship: draftPerson.relationship || null,
+        monthlyIncome: draftPerson.monthlyIncome ? Number(draftPerson.monthlyIncome) : null,
+        workingHoursPerMonth: draftPerson.workingHoursPerMonth ? Number(draftPerson.workingHoursPerMonth) : null,
+        birthOrder: draftPerson.birthOrder ? Number(draftPerson.birthOrder) : null,
+        status: 'active',
         responsibilities: draftPerson.responsibilities,
         preferences: {},
         createdAt: serverTimestamp(),
@@ -130,6 +189,11 @@ export default function OnboardingPage() {
   return (
     <main className="flex min-h-screen items-center justify-center px-4 py-12">
       <div className="w-full max-w-lg space-y-6 rounded-xl border border-slate-200 bg-white p-8 shadow-sm">
+        {step !== 'household' && step !== 'done' && (
+          <button onClick={goBack} className="text-sm text-slate-500 hover:underline">
+            ← Back
+          </button>
+        )}
         <StepIndicator step={step} />
 
         {step === 'household' && (
@@ -143,6 +207,7 @@ export default function OnboardingPage() {
               onChange={(e) => setHouseholdName(e.target.value)}
               className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none"
             />
+
             {error && <p className="text-sm text-red-600">{error}</p>}
             <button
               type="submit"
@@ -184,10 +249,10 @@ export default function OnboardingPage() {
 
               <div className="flex gap-3">
                 <input
-                  type="number"
-                  placeholder="Age"
-                  value={draftPerson.age}
-                  onChange={(e) => setDraftPerson({ ...draftPerson, age: e.target.value })}
+                  type="date"
+                  aria-label="Date of birth"
+                  value={draftPerson.dateOfBirth}
+                  onChange={(e) => setDraftPerson({ ...draftPerson, dateOfBirth: e.target.value })}
                   className="w-1/2 rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none"
                 />
                 <select
@@ -210,20 +275,68 @@ export default function OnboardingPage() {
                 </select>
               </div>
 
-              <select
-                value={draftPerson.incomeBracket}
-                onChange={(e) =>
-                  setDraftPerson({ ...draftPerson, incomeBracket: e.target.value })
-                }
-                className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none"
-              >
-                <option value="">Income bracket (optional)</option>
-                {INCOME_BRACKETS.map((b) => (
-                  <option key={b} value={b}>
-                    {b}
-                  </option>
-                ))}
-              </select>
+              <div className="flex gap-3">
+                <select
+                  value={draftPerson.citizenshipStatus}
+                  onChange={(e) =>
+                    setDraftPerson({
+                      ...draftPerson,
+                      citizenshipStatus: e.target.value as CitizenshipStatus | '',
+                    })
+                  }
+                  className="w-1/2 rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none"
+                >
+                  <option value="">Citizenship (optional)</option>
+                  <option value="citizen">Singapore Citizen</option>
+                  <option value="pr">Permanent Resident</option>
+                  <option value="other">Other</option>
+                </select>
+                <select
+                  value={draftPerson.relationship}
+                  onChange={(e) =>
+                    setDraftPerson({
+                      ...draftPerson,
+                      relationship: e.target.value as PersonRelationship | '',
+                    })
+                  }
+                  className="w-1/2 rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none"
+                >
+                  <option value="">Relationship (optional)</option>
+                  <option value="self">Self</option>
+                  <option value="spouse">Spouse</option>
+                  <option value="child">Child</option>
+                  <option value="other">Other</option>
+                </select>
+              </div>
+
+              <div className="flex gap-3">
+                <input
+                  type="number"
+                  placeholder="Monthly income ($, optional)"
+                  value={draftPerson.monthlyIncome}
+                  onChange={(e) => setDraftPerson({ ...draftPerson, monthlyIncome: e.target.value })}
+                  className="w-1/2 rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none"
+                />
+                <input
+                  type="number"
+                  placeholder="Working hours/month (optional)"
+                  value={draftPerson.workingHoursPerMonth}
+                  onChange={(e) =>
+                    setDraftPerson({ ...draftPerson, workingHoursPerMonth: e.target.value })
+                  }
+                  className="w-1/2 rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none"
+                />
+              </div>
+
+              {draftPerson.relationship === 'child' && (
+                <input
+                  type="number"
+                  placeholder="Birth order (e.g. 3 = 3rd child, optional)"
+                  value={draftPerson.birthOrder}
+                  onChange={(e) => setDraftPerson({ ...draftPerson, birthOrder: e.target.value })}
+                  className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none"
+                />
+              )}
 
               <div>
                 <p className="mb-2 text-sm font-medium text-slate-700">Responsibilities</p>
@@ -253,13 +366,59 @@ export default function OnboardingPage() {
             </form>
 
             <button
-              onClick={() => setStep('business')}
+              onClick={() => setStep('housing')}
               disabled={addedPeople.length === 0}
               className="w-full rounded-md bg-slate-900 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50"
             >
               Continue
             </button>
           </div>
+        )}
+
+        {step === 'housing' && (
+          <form onSubmit={handleSaveHousing} className="space-y-4">
+            <h1 className="text-xl font-semibold">Tell us about your home</h1>
+            <p className="text-sm text-slate-500">
+              Optional — helps us find relevant government schemes for you later.
+            </p>
+            <select
+              value={housingType}
+              onChange={(e) => setHousingType(e.target.value as HousingType | '')}
+              className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none"
+            >
+              <option value="">Housing type</option>
+              {HOUSING_TYPES.map((h) => (
+                <option key={h} value={h}>
+                  {HOUSING_TYPE_LABELS[h]}
+                </option>
+              ))}
+            </select>
+            <div className="flex gap-3">
+              <input
+                type="number"
+                placeholder="Properties owned"
+                value={propertiesOwned}
+                onChange={(e) => setPropertiesOwned(e.target.value)}
+                className="w-1/2 rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none"
+              />
+              <input
+                type="number"
+                placeholder="Home annual value ($)"
+                value={residentialAnnualValue}
+                onChange={(e) => setResidentialAnnualValue(e.target.value)}
+                className="w-1/2 rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none"
+              />
+            </div>
+
+            {error && <p className="text-sm text-red-600">{error}</p>}
+            <button
+              type="submit"
+              disabled={submitting}
+              className="w-full rounded-md bg-slate-900 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50"
+            >
+              {submitting ? 'Saving…' : 'Continue'}
+            </button>
+          </form>
         )}
 
         {step === 'business' && (
@@ -344,12 +503,11 @@ export default function OnboardingPage() {
 }
 
 function StepIndicator({ step }: { step: Step }) {
-  const steps: Step[] = ['household', 'people', 'business', 'done']
-  const currentIndex = steps.indexOf(step)
+  const currentIndex = STEPS.indexOf(step)
 
   return (
     <div className="flex items-center gap-2">
-      {steps.map((s, i) => (
+      {STEPS.map((s, i) => (
         <div
           key={s}
           className={`h-1.5 flex-1 rounded-full ${

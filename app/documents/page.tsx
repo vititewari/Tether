@@ -3,12 +3,25 @@
 import { useEffect, useState } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
-import { collection, query, where, limit, getDocs, addDoc, serverTimestamp } from 'firebase/firestore'
-import { ref, uploadBytes, getDownloadURL } from 'firebase/storage'
+import {
+  collection,
+  query,
+  where,
+  limit,
+  getDocs,
+  addDoc,
+  deleteDoc,
+  doc as firestoreDoc,
+  serverTimestamp,
+  updateDoc,
+} from 'firebase/firestore'
+import { ref, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage'
 import { useAuth } from '@/lib/AuthProvider'
 import { db, storage } from '@/lib/firebaseClient'
 import { extractTextFromFile } from '@/lib/pdfText'
-import type { Household, Person, ExtractedDocument, DocumentType } from '@/lib/types'
+import { assignmentReason, buildTaskFromDocument } from '@/lib/tasks'
+import type { Household, Person, ExtractedDocument, DocumentType, Task } from '@/lib/types'
+import TaskAssignedModal from '@/components/TaskAssignedModal'
 
 type UploadStage = 'idle' | 'reading' | 'classifying' | 'saving' | 'done' | 'error'
 
@@ -29,12 +42,17 @@ export default function DocumentsPage() {
   const [household, setHousehold] = useState<Household | null>(null)
   const [people, setPeople] = useState<Person[]>([])
   const [documents, setDocuments] = useState<ExtractedDocument[]>([])
+  const [tasks, setTasks] = useState<Task[]>([])
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
 
   const [stage, setStage] = useState<UploadStage>('idle')
   const [error, setError] = useState<string | null>(null)
+  const [taskWarning, setTaskWarning] = useState<string | null>(null)
   const [lastResult, setLastResult] = useState<ExtractedDocument | null>(null)
   const [dragActive, setDragActive] = useState(false)
+  const [busyDocId, setBusyDocId] = useState<string | null>(null)
+  const [assignedPopup, setAssignedPopup] = useState<{ task: Task; reason: string } | null>(null)
 
   useEffect(() => {
     if (authLoading) return
@@ -44,31 +62,41 @@ export default function DocumentsPage() {
     }
 
     async function loadData() {
-      const q = query(collection(db, 'households'), where('ownerId', '==', user!.uid), limit(1))
-      const snapshot = await getDocs(q)
+      try {
+        const q = query(collection(db, 'households'), where('ownerId', '==', user!.uid), limit(1))
+        const snapshot = await getDocs(q)
 
-      if (snapshot.empty) {
-        router.replace('/onboarding')
-        return
+        if (snapshot.empty) {
+          router.replace('/onboarding')
+          return
+        }
+
+        const householdDoc = snapshot.docs[0]
+        const householdData: Household = {
+          id: householdDoc.id,
+          ...(householdDoc.data() as Omit<Household, 'id'>),
+        }
+        setHousehold(householdData)
+
+        const [peopleSnap, docsSnap, tasksSnap] = await Promise.all([
+          getDocs(collection(db, 'households', householdData.id, 'people')),
+          getDocs(collection(db, 'households', householdData.id, 'documents')),
+          getDocs(collection(db, 'households', householdData.id, 'tasks')),
+        ])
+
+        setPeople(peopleSnap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<Person, 'id'>) })))
+        setDocuments(
+          docsSnap.docs.map((d) => {
+            const raw = d.data() as Omit<ExtractedDocument, 'id'>
+            return { id: d.id, ...raw, fileUrl: raw.fileUrl ?? null }
+          })
+        )
+        setTasks(tasksSnap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<Task, 'id'>) })))
+      } catch (err: any) {
+        setLoadError(err?.message ?? 'Could not load this page.')
+      } finally {
+        setLoading(false)
       }
-
-      const householdDoc = snapshot.docs[0]
-      const householdData: Household = {
-        id: householdDoc.id,
-        ...(householdDoc.data() as Omit<Household, 'id'>),
-      }
-      setHousehold(householdData)
-
-      const [peopleSnap, docsSnap] = await Promise.all([
-        getDocs(collection(db, 'households', householdData.id, 'people')),
-        getDocs(collection(db, 'households', householdData.id, 'documents')),
-      ])
-
-      setPeople(peopleSnap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<Person, 'id'>) })))
-      setDocuments(
-        docsSnap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<ExtractedDocument, 'id'>) }))
-      )
-      setLoading(false)
     }
 
     loadData()
@@ -77,6 +105,7 @@ export default function DocumentsPage() {
   async function handleFile(file: File) {
     if (!household) return
     setError(null)
+    setTaskWarning(null)
     setLastResult(null)
 
     try {
@@ -111,10 +140,12 @@ export default function DocumentsPage() {
       const storagePath = `households/${household.id}/documents/${Date.now()}-${file.name}`
       const storageRef = ref(storage, storagePath)
       await uploadBytes(storageRef, file)
+      const fileUrl = await getDownloadURL(storageRef)
 
       const docRef = await addDoc(collection(db, 'households', household.id, 'documents'), {
         fileName: file.name,
         storagePath,
+        fileUrl,
         documentType: extracted.documentType ?? 'other',
         summary: extracted.summary ?? '',
         linkedPersonId: matchedPerson?.id ?? null,
@@ -129,6 +160,7 @@ export default function DocumentsPage() {
         id: docRef.id,
         fileName: file.name,
         storagePath,
+        fileUrl,
         documentType: extracted.documentType ?? 'other',
         summary: extracted.summary ?? '',
         linkedPersonId: matchedPerson?.id ?? null,
@@ -142,9 +174,74 @@ export default function DocumentsPage() {
       setDocuments((prev) => [newDoc, ...prev])
       setLastResult(newDoc)
       setStage('done')
+
+      // Task creation is best-effort and separate from the try/catch above —
+      // a hiccup here (e.g. a permissions issue) shouldn't make an otherwise
+      // successful upload look like it failed.
+      if (newDoc.actionRequired) {
+        try {
+          const taskFields = buildTaskFromDocument(newDoc, people)
+          const taskRef = await addDoc(collection(db, 'households', household.id, 'tasks'), {
+            ...taskFields,
+            createdAt: serverTimestamp(),
+          })
+          const newTask: Task = { id: taskRef.id, ...taskFields, createdAt: Date.now() }
+          setTasks((prev) => [...prev, newTask])
+          const assignee = people.find((p) => p.id === newTask.assignedPersonId) ?? null
+          setAssignedPopup({ task: newTask, reason: assignmentReason(newDoc.documentType, assignee) })
+        } catch {
+          setTaskWarning(
+            `"${newDoc.fileName}" uploaded, but the task couldn't be created automatically — use "Add to Tasks" below.`
+          )
+        }
+      }
     } catch (err: any) {
       setError(err?.message ?? 'Something went wrong.')
       setStage('error')
+    }
+  }
+
+  function taskForDocument(documentId: string): Task | undefined {
+    return tasks.find((t) => t.sourceDocumentId === documentId)
+  }
+
+  async function handleCreateTaskFor(document: ExtractedDocument) {
+    if (!household) return
+    setBusyDocId(document.id)
+    try {
+      const taskFields = buildTaskFromDocument(document, people)
+      const taskRef = await addDoc(collection(db, 'households', household.id, 'tasks'), {
+        ...taskFields,
+        createdAt: serverTimestamp(),
+      })
+      const newTask: Task = { id: taskRef.id, ...taskFields, createdAt: Date.now() }
+      setTasks((prev) => [...prev, newTask])
+      const assignee = people.find((p) => p.id === newTask.assignedPersonId) ?? null
+      setAssignedPopup({ task: newTask, reason: assignmentReason(document.documentType, assignee) })
+    } catch (err: any) {
+      setError(err?.message ?? 'Could not create a task for this document.')
+    } finally {
+      setBusyDocId(null)
+    }
+  }
+
+  async function handleChangePopupAssignee(personId: string) {
+    if (!household || !assignedPopup) return
+    const name = personId ? people.find((p) => p.id === personId)?.name ?? null : null
+    const taskId = assignedPopup.task.id
+    setAssignedPopup((prev) =>
+      prev ? { ...prev, task: { ...prev.task, assignedPersonId: personId || null, assignedPersonName: name } } : prev
+    )
+    setTasks((prev) =>
+      prev.map((t) => (t.id === taskId ? { ...t, assignedPersonId: personId || null, assignedPersonName: name } : t))
+    )
+    try {
+      await updateDoc(firestoreDoc(db, 'households', household.id, 'tasks', taskId), {
+        assignedPersonId: personId || null,
+        assignedPersonName: name,
+      })
+    } catch (err: any) {
+      setError(err?.message ?? 'Could not update the assignee.')
     }
   }
 
@@ -159,6 +256,42 @@ export default function DocumentsPage() {
     return people.find((p) => p.id === personId)?.name ?? null
   }
 
+  async function handleView(document: ExtractedDocument) {
+    if (document.fileUrl) {
+      window.open(document.fileUrl, '_blank', 'noopener,noreferrer')
+      return
+    }
+    // Older documents uploaded before fileUrl was captured — fetch it now.
+    setBusyDocId(document.id)
+    try {
+      const url = await getDownloadURL(ref(storage, document.storagePath))
+      setDocuments((prev) => prev.map((d) => (d.id === document.id ? { ...d, fileUrl: url } : d)))
+      window.open(url, '_blank', 'noopener,noreferrer')
+    } catch {
+      setError('Could not open this file — it may have been removed from storage.')
+    } finally {
+      setBusyDocId(null)
+    }
+  }
+
+  async function handleDelete(document: ExtractedDocument) {
+    if (!household) return
+    if (!window.confirm(`Delete "${document.fileName}"? This can't be undone.`)) return
+
+    setBusyDocId(document.id)
+    try {
+      await deleteObject(ref(storage, document.storagePath)).catch(() => {
+        // File may already be gone from storage — still remove the record.
+      })
+      await deleteDoc(firestoreDoc(db, 'households', household.id, 'documents', document.id))
+      setDocuments((prev) => prev.filter((d) => d.id !== document.id))
+    } catch (err: any) {
+      setError(err?.message ?? 'Could not delete this document.')
+    } finally {
+      setBusyDocId(null)
+    }
+  }
+
   if (loading || authLoading) {
     return (
       <main className="flex min-h-screen items-center justify-center">
@@ -166,6 +299,20 @@ export default function DocumentsPage() {
       </main>
     )
   }
+
+  if (loadError) {
+    return (
+      <main className="mx-auto max-w-4xl px-4 py-10">
+        <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">{loadError}</div>
+      </main>
+    )
+  }
+
+  const needsActionCount = documents.filter((d) => {
+    if (!d.actionRequired) return false
+    const task = taskForDocument(d.id)
+    return !task || task.status === 'open'
+  }).length
 
   return (
     <main className="mx-auto max-w-4xl px-4 py-10">
@@ -175,6 +322,25 @@ export default function DocumentsPage() {
           ← Back to Family Graph
         </Link>
       </div>
+
+      {needsActionCount > 0 && (
+        <Link
+          href="/tasks"
+          className="mb-6 flex items-center justify-between rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 hover:bg-amber-100"
+        >
+          <span>
+            🔔 {needsActionCount} document{needsActionCount > 1 ? 's' : ''} need{needsActionCount === 1 ? 's' : ''}{' '}
+            action
+          </span>
+          <span className="font-medium underline">View Tasks →</span>
+        </Link>
+      )}
+
+      {taskWarning && (
+        <div className="mb-6 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+          {taskWarning}
+        </div>
+      )}
 
       <label
         onDragOver={(e) => {
@@ -227,7 +393,10 @@ export default function DocumentsPage() {
           {lastResult.actionRequired && (
             <p className="text-emerald-800">
               🔔 Action needed: {lastResult.actionDescription}
-              {lastResult.renewalDate && ` (by ${lastResult.renewalDate})`}
+              {lastResult.renewalDate && ` (by ${lastResult.renewalDate})`} —{' '}
+              <Link href="/tasks" className="underline">
+                added to Tasks
+              </Link>
             </p>
           )}
         </div>
@@ -239,29 +408,72 @@ export default function DocumentsPage() {
           <p className="text-sm text-slate-400">No documents uploaded yet.</p>
         ) : (
           <div className="space-y-2">
-            {documents.map((doc) => (
+            {documents.map((docItem) => (
               <div
-                key={doc.id}
-                className="flex items-center justify-between rounded-lg border border-slate-200 bg-white p-3"
+                key={docItem.id}
+                className="flex items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white p-3"
               >
-                <div>
-                  <p className="text-sm font-medium text-slate-900">{doc.fileName}</p>
+                <div className="min-w-0">
+                  <button
+                    onClick={() => handleView(docItem)}
+                    disabled={busyDocId === docItem.id}
+                    className="truncate text-left text-sm font-medium text-slate-900 hover:underline disabled:opacity-50"
+                    title={docItem.fileName}
+                  >
+                    {docItem.fileName}
+                  </button>
                   <p className="text-xs text-slate-500">
-                    {DOCUMENT_TYPE_LABELS[doc.documentType]}
-                    {personName(doc.linkedPersonId) && ` · ${personName(doc.linkedPersonId)}`}
-                    {doc.renewalDate && ` · due ${doc.renewalDate}`}
+                    {DOCUMENT_TYPE_LABELS[docItem.documentType]}
+                    {personName(docItem.linkedPersonId) && ` · ${personName(docItem.linkedPersonId)}`}
+                    {docItem.renewalDate && ` · due ${docItem.renewalDate}`}
                   </p>
                 </div>
-                {doc.actionRequired && (
-                  <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-700">
-                    Action needed
-                  </span>
-                )}
+                <div className="flex shrink-0 items-center gap-2">
+                  {docItem.actionRequired && (() => {
+                    const task = taskForDocument(docItem.id)
+                    if (task) {
+                      return (
+                        <Link
+                          href="/tasks"
+                          className="rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-700 hover:bg-amber-200"
+                        >
+                          {task.status === 'open' ? 'Action needed →' : 'Action needed ✓'}
+                        </Link>
+                      )
+                    }
+                    return (
+                      <button
+                        onClick={() => handleCreateTaskFor(docItem)}
+                        disabled={busyDocId === docItem.id}
+                        className="rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-700 hover:bg-amber-200 disabled:opacity-50"
+                      >
+                        {busyDocId === docItem.id ? '…' : 'Action needed — Add to Tasks'}
+                      </button>
+                    )
+                  })()}
+                  <button
+                    onClick={() => handleDelete(docItem)}
+                    disabled={busyDocId === docItem.id}
+                    className="rounded-md border border-slate-300 px-2 py-1 text-xs text-slate-500 hover:bg-red-50 hover:text-red-600 disabled:opacity-50"
+                  >
+                    {busyDocId === docItem.id ? '…' : 'Delete'}
+                  </button>
+                </div>
               </div>
             ))}
           </div>
         )}
       </div>
+
+      {assignedPopup && (
+        <TaskAssignedModal
+          task={assignedPopup.task}
+          people={people}
+          reason={assignedPopup.reason}
+          onChangeAssignee={handleChangePopupAssignee}
+          onClose={() => setAssignedPopup(null)}
+        />
+      )}
     </main>
   )
 }
