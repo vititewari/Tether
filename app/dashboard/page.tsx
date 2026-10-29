@@ -9,6 +9,10 @@ import { useAuth } from '@/lib/AuthProvider'
 import { auth, db } from '@/lib/firebaseClient'
 import type { Household, Person, Business } from '@/lib/types'
 import FamilyTree from '@/components/FamilyTree'
+import HouseIllustration from '@/components/HouseIllustration'
+import { DocumentIcon, FinanceIcon, FamilyIcon, BillsIcon, TasksIcon, BenefitsIcon } from '@/components/RoomIcons'
+import { calculateRoomMetrics, calculateDocumentHealth } from '@/lib/roomHealth'
+import type { Task } from '@/lib/taskTypes'
 
 export default function DashboardPage() {
   const { user, loading: authLoading } = useAuth()
@@ -17,6 +21,8 @@ export default function DashboardPage() {
   const [household, setHousehold] = useState<Household | null>(null)
   const [people, setPeople] = useState<Person[]>([])
   const [businesses, setBusinesses] = useState<Business[]>([])
+  const [tasks, setTasks] = useState<Task[]>([])
+  const [documents, setDocuments] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
 
@@ -44,15 +50,19 @@ export default function DashboardPage() {
         }
         setHousehold(householdData)
 
-        const [peopleSnap, businessSnap] = await Promise.all([
+        const [peopleSnap, businessSnap, tasksSnap, docsSnap] = await Promise.all([
           getDocs(collection(db, 'households', householdData.id, 'people')),
           getDocs(collection(db, 'households', householdData.id, 'businesses')),
+          getDocs(collection(db, 'households', householdData.id, 'tasks')),
+          getDocs(collection(db, 'households', householdData.id, 'documents')),
         ])
 
         setPeople(peopleSnap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<Person, 'id'>) })))
         setBusinesses(
           businessSnap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<Business, 'id'>) }))
         )
+        setTasks(tasksSnap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<Task, 'id'>) })))
+        setDocuments(docsSnap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })))
       } catch (err: any) {
         setLoadError(err?.message ?? 'Could not load this page.')
       } finally {
@@ -135,11 +145,68 @@ export default function DashboardPage() {
       </div>
 
       {household && (
-        <FamilyTree
-          householdName={household.name}
-          people={people}
-          businesses={businesses}
-        />
+        <>
+          <HouseIllustration
+            rooms={[
+              {
+                id: 'documents',
+                title: 'Documents',
+                subtitle: 'All your papers, in one place',
+                icon: <DocumentIcon />,
+                metrics: calculateDocumentHealth(documents),
+                onClick: () => router.push('/documents'),
+              },
+              {
+                id: 'finance-insurance',
+                title: 'Finances & Insurance',
+                subtitle: 'Policies, accounts, overview',
+                icon: <FinanceIcon />,
+                metrics: calculateRoomMetrics(tasks.filter((t) => t.category === 'finance' || t.category === 'insurance'), new Date()),
+                onClick: () => router.push('/tasks?categories=finance,insurance'),
+              },
+              {
+                id: 'family',
+                title: 'Family',
+                subtitle: 'Profiles, roles, responsibilities',
+                icon: <FamilyIcon />,
+                metrics: calculateRoomMetrics(tasks.filter((t) => t.category === 'education' || t.category === 'health' || t.category === 'identity'), new Date()),
+                onClick: () => {},
+              },
+              {
+                id: 'bills-payments',
+                title: 'Bills & Payments',
+                subtitle: 'Due dates and payment history',
+                icon: <BillsIcon />,
+                metrics: calculateRoomMetrics(tasks.filter((t) => t.isPayment), new Date()),
+                onClick: () => router.push('/tasks?isPayment=true'),
+              },
+              {
+                id: 'tasks',
+                title: 'Tasks',
+                subtitle: 'To-dos and upcoming work',
+                icon: <TasksIcon />,
+                metrics: calculateRoomMetrics(tasks.filter((t) => t.category === 'other' || !t.category), new Date()),
+                onClick: () => router.push('/tasks'),
+              },
+              {
+                id: 'benefits',
+                title: 'Benefits & Grants',
+                subtitle: 'Schemes you qualify for',
+                icon: <BenefitsIcon />,
+                metrics: { state: 'thriving', totalTasks: 0, overdueCount: 0, dueWithin7: 0, maxOverduesDays: null, financialImpact: 0, urgentTask: null },
+                onClick: () => router.push('/opportunities'),
+              },
+            ]}
+          />
+
+          <div className="mt-8">
+            <FamilyTree
+              householdName={household.name}
+              people={people}
+              businesses={businesses}
+            />
+          </div>
+        </>
       )}
     </main>
   )
